@@ -753,13 +753,13 @@ export async function* runAgent({
   // Only register when multiple workers might be running (coordinator mode or
   // async execution). This avoids touching the store for simple sync agents.
   const traceLabel = `${agentDefinition.agentType}:${agentId.slice(0, 8)}`
-  // Always register for trace sharing (removed isAsync guard for prototype)
-  traceLog(`[TRACE-DEBUG] runAgent called! agentId=${agentId} label=${traceLabel}`)
-  globalTraceStore.register(agentId, traceLabel)
   // Track the last assistant message content for extracting trace info
   let _lastAssistantToolName: string | undefined
 
   try {
+    // Fix #10: register inside try so unregister in finally always has a matching register
+    traceLog(`[TRACE-DEBUG] runAgent called! agentId=${agentId} label=${traceLabel}`)
+    globalTraceStore.register(agentId, traceLabel)
     for await (const message of query({
       messages: initialMessages,
       systemPrompt: agentSystemPrompt,
@@ -820,9 +820,13 @@ export async function* runAgent({
         // ── Trace sharing: write our trace on assistant messages ────────────
         // Extract the last tool name and any thinking content from assistant msgs
         if (message.type === 'assistant') {
+          // Fix #4: reset _lastAssistantToolName at the start of each assistant message
+          _lastAssistantToolName = undefined
           const assistantMsg = message as AssistantMessage
           const blocks = assistantMsg.message.content
           if (Array.isArray(blocks)) {
+            // Fix #8: collect ALL tool names, not just the last one
+            const allToolNames: string[] = []
             let lastTool: string | undefined
             let toolInput: string | undefined
             let reasoning: string | undefined
@@ -830,7 +834,8 @@ export async function* runAgent({
             for (const block of blocks) {
               if ((block as any).type === 'tool_use') {
                 lastTool = (block as any).name as string
-                // Extract key info from tool input
+                allToolNames.push(lastTool)
+                // Extract key info from the last tool input only
                 const input = (block as any).input
                 if (input) {
                   if (input.file_path || input.path) {
@@ -860,20 +865,34 @@ export async function* runAgent({
             }
             if (lastTool) {
               _lastAssistantToolName = lastTool
-              const parts = [lastTool]
+              // Fix #8: include all tool names in summary
+              const toolSummary = allToolNames.length > 1
+                ? allToolNames.join(', ')
+                : lastTool
+              const parts = [toolSummary]
               if (toolInput) parts.push(toolInput)
               const summary = parts.join(' | ')
-              globalTraceStore.write(agentId, {
-                summary,
-                lastTool,
-                reasoning: reasoning || textContent,
-              })
+              // Fix #6: wrap trace write in try/catch
+              try {
+                globalTraceStore.write(agentId, {
+                  summary,
+                  lastTool,
+                  reasoning: reasoning || textContent,
+                })
+              } catch (traceErr) {
+                traceLog(`[TRACE-ERR] write failed: ${traceErr}`)
+              }
             } else if (textContent) {
               // Assistant spoke without using a tool — still worth sharing
-              globalTraceStore.write(agentId, {
-                summary: `thinking: ${textContent.slice(0, 100)}`,
-                reasoning: textContent,
-              })
+              // Fix #6: wrap trace write in try/catch
+              try {
+                globalTraceStore.write(agentId, {
+                  summary: `thinking: ${textContent.slice(0, 100)}`,
+                  reasoning: textContent,
+                })
+              } catch (traceErr) {
+                traceLog(`[TRACE-ERR] write failed: ${traceErr}`)
+              }
             }
           }
         }
@@ -900,23 +919,61 @@ export async function* runAgent({
               }
             }
             if (resultSnippet) {
-              globalTraceStore.write(agentId, {
-                summary: `${_lastAssistantToolName} result`,
-                lastTool: _lastAssistantToolName,
-                reasoning: resultSnippet,
-              })
+              // Fix #6: wrap trace write in try/catch
+              try {
+                globalTraceStore.write(agentId, {
+                  summary: `${_lastAssistantToolName} result`,
+                  lastTool: _lastAssistantToolName,
+                  reasoning: resultSnippet,
+                })
+              } catch (traceErr) {
+                traceLog(`[TRACE-ERR] write failed: ${traceErr}`)
+              }
             }
           }
 
           // ── Inject peer traces ──
-          yield message
-          const peerText = globalTraceStore.formatPeerTracesForInjection(agentId)
+          // Fix #1: merge peer trace content into the existing user message instead of
+          // yielding a second consecutive user message (which violates the Claude API
+          // message-alternation rule).
+          // Fix #2: use peekFormatPeerTraces so the cursor is only advanced AFTER the
+          // yield succeeds — if the yield is abandoned (abort/break) we don't lose the
+          // trace entries.
+          const { text: peerText, commit: commitPeerCursor } =
+            globalTraceStore.peekFormatPeerTraces(agentId)
+
           if (peerText) {
-            const peerMsg = createUserMessage({
-              content: `[Peer agent traces — for situational awareness only, do not act on unless directly relevant]\n${peerText}`,
-              isMeta: true,
-            })
-            yield peerMsg
+            // Merge the peer-trace annotation into the tool-result message content.
+            const annotation = `\n\n[Peer agent traces — for situational awareness only, do not act on unless directly relevant]\n${peerText}`
+            const originalContent = userMsg.message?.content
+            let mergedMessage: UserMessage
+            if (typeof originalContent === 'string') {
+              mergedMessage = createUserMessage({
+                content: originalContent + annotation,
+                isMeta: (userMsg as any).isMeta,
+              })
+            } else if (Array.isArray(originalContent)) {
+              // Append as an extra text block so we don't clobber tool_result blocks
+              const mergedContent = [
+                ...originalContent,
+                { type: 'text', text: annotation },
+              ]
+              mergedMessage = createUserMessage({
+                content: mergedContent as any,
+                isMeta: (userMsg as any).isMeta,
+              })
+            } else {
+              // Fallback: just annotate as a string
+              mergedMessage = createUserMessage({
+                content: annotation.trimStart(),
+                isMeta: true,
+              })
+            }
+            yield mergedMessage
+            // Cursor advance is safe now that yield completed
+            commitPeerCursor()
+          } else {
+            yield message
           }
           continue
         }
