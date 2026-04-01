@@ -10,6 +10,13 @@
  * - Thread-safe at the JS level (single-threaded event loop)
  */
 
+import { appendFileSync } from 'node:fs'
+
+const TRACE_LOG = '/tmp/agent-trace.log'
+function traceLog(msg: string) {
+  try { appendFileSync(TRACE_LOG, `${new Date().toISOString()} ${msg}\n`) } catch {}
+}
+
 export interface TraceEntry {
   /** ISO timestamp when the trace was written */
   timestamp: number
@@ -51,7 +58,7 @@ class TraceStore {
         sequence: 0,
       })
       const name = label ?? agentId.slice(0, 8)
-      console.error(`\x1b[34m[TRACE-STORE]\x1b[0m Agent registered: \x1b[33m${name}\x1b[0m (total: ${this.agents.size})`)
+      traceLog(`[TRACE-STORE] Agent registered: ${name} (total: ${this.agents.size})`)
     }
     if (!this.cursors.has(agentId)) {
       this.cursors.set(agentId, new Map())
@@ -61,7 +68,7 @@ class TraceStore {
   /** Unregister an agent on completion to free memory. */
   unregister(agentId: string): void {
     const label = this.agents.get(agentId)?.label ?? agentId.slice(0, 8)
-    console.error(`\x1b[34m[TRACE-STORE]\x1b[0m Agent unregistered: \x1b[33m${label}\x1b[0m`)
+    traceLog(`[TRACE-STORE] Agent unregistered: ${label}`)
     this.agents.delete(agentId)
     this.cursors.delete(agentId)
     // Remove stale cursors pointing to this agent
@@ -87,7 +94,7 @@ class TraceStore {
     // Visual logging for debugging
     const label = state.label ?? agentId.slice(0, 8)
     const tool = entry.lastTool ? ` [${entry.lastTool}]` : ''
-    console.error(`\x1b[36m[TRACE-WRITE]\x1b[0m \x1b[33m${label}\x1b[0m${tool} → ${entry.summary}`)
+    traceLog(`[TRACE-WRITE] ${label}${tool} → ${entry.summary}`)
 
     // Prune oldest entries if over limit
     if (state.entries.length > this.maxEntriesPerAgent) {
@@ -155,7 +162,7 @@ class TraceStore {
     for (const peer of peerTraces) {
       const peerLabel = peer.label ?? peer.agentId.slice(0, 8)
       for (const entry of peer.entries) {
-        console.error(`\x1b[32m[TRACE-READ]\x1b[0m \x1b[33m${readerLabel}\x1b[0m ← received from \x1b[35m${peerLabel}\x1b[0m: "${entry.summary}"`)
+        traceLog(`[TRACE-READ] ${readerLabel} ← received from ${peerLabel}: "${entry.summary}"`)
       }
     }
 

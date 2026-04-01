@@ -4,6 +4,10 @@ import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { globalTraceStore } from '../../coordinator/traceStore.js'
+import { appendFileSync } from 'node:fs'
+function traceLog(msg: string) {
+  try { appendFileSync('/tmp/agent-trace.log', `${new Date().toISOString()} ${msg}\n`) } catch {}
+}
 import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
@@ -750,7 +754,7 @@ export async function* runAgent({
   // async execution). This avoids touching the store for simple sync agents.
   const traceLabel = `${agentDefinition.agentType}:${agentId.slice(0, 8)}`
   // Always register for trace sharing (removed isAsync guard for prototype)
-  console.error(`\x1b[31m[TRACE-DEBUG]\x1b[0m runAgent called! agentId=${agentId} label=${traceLabel}`)
+  traceLog(`[TRACE-DEBUG] runAgent called! agentId=${agentId} label=${traceLabel}`)
   globalTraceStore.register(agentId, traceLabel)
   // Track the last assistant message content for extracting trace info
   let _lastAssistantToolName: string | undefined
