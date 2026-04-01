@@ -848,13 +848,13 @@ export async function* runAgent({
               if ((block as any).type === 'thinking' && !(reasoning)) {
                 const raw = (block as any).thinking as string | undefined
                 if (raw) {
-                  reasoning = raw.length > 200 ? raw.slice(0, 200) + '…' : raw
+                  reasoning = raw.length > 500 ? raw.slice(0, 500) + '…' : raw
                 }
               }
               if ((block as any).type === 'text' && !(textContent)) {
                 const raw = (block as any).text as string | undefined
                 if (raw) {
-                  textContent = raw.length > 150 ? raw.slice(0, 150) + '…' : raw
+                  textContent = raw.length > 300 ? raw.slice(0, 300) + '…' : raw
                 }
               }
             }
@@ -878,10 +878,37 @@ export async function* runAgent({
           }
         }
 
-        // ── Trace sharing: inject peer traces after user (tool result) msgs ──
-        // After a tool result arrives, we know other workers may have progressed.
-        // Append a meta message so this agent sees peer reasoning in context.
+        // ── Trace sharing: capture tool results into trace ──────────────────
+        // When a tool result comes back, write its summary to trace so peers
+        // know what this agent *found*, not just what tool it called.
         if (message.type === 'user') {
+          const userMsg = message as UserMessage
+          const content = userMsg.message?.content
+          if (content && _lastAssistantToolName) {
+            let resultSnippet: string | undefined
+            if (typeof content === 'string') {
+              resultSnippet = content.length > 300 ? content.slice(0, 300) + '…' : content
+            } else if (Array.isArray(content)) {
+              for (const block of content) {
+                if ((block as any).type === 'tool_result' || (block as any).type === 'text') {
+                  const raw = (block as any).text || (block as any).content
+                  if (typeof raw === 'string' && raw.length > 0) {
+                    resultSnippet = raw.length > 300 ? raw.slice(0, 300) + '…' : raw
+                    break
+                  }
+                }
+              }
+            }
+            if (resultSnippet) {
+              globalTraceStore.write(agentId, {
+                summary: `${_lastAssistantToolName} result`,
+                lastTool: _lastAssistantToolName,
+                reasoning: resultSnippet,
+              })
+            }
+          }
+
+          // ── Inject peer traces ──
           yield message
           const peerText = globalTraceStore.formatPeerTracesForInjection(agentId)
           if (peerText) {
