@@ -3,6 +3,7 @@ import type { UUID } from 'crypto'
 import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { logForDebugging } from 'src/utils/debug.js'
+import { globalTraceStore } from '../../coordinator/traceStore.js'
 import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
@@ -744,6 +745,16 @@ export async function* runAgent({
   // Track the last recorded message UUID for parent chain continuity
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
 
+  // ── Trace sharing: register this agent in the global store ──────────────
+  // Only register when multiple workers might be running (coordinator mode or
+  // async execution). This avoids touching the store for simple sync agents.
+  const traceLabel = `${agentDefinition.agentType}:${agentId.slice(0, 8)}`
+  if (isAsync) {
+    globalTraceStore.register(agentId, traceLabel)
+  }
+  // Track the last assistant message content for extracting trace info
+  let _lastAssistantToolName: string | undefined
+
   try {
     for await (const message of query({
       messages: initialMessages,
@@ -801,6 +812,54 @@ export async function* runAgent({
         if (message.type !== 'progress') {
           lastRecordedUuid = message.uuid
         }
+
+        // ── Trace sharing: write our trace on assistant messages ────────────
+        // Extract the last tool name and any thinking content from assistant msgs
+        if (isAsync && message.type === 'assistant') {
+          const assistantMsg = message as AssistantMessage
+          const blocks = assistantMsg.message.content
+          if (Array.isArray(blocks)) {
+            let lastTool: string | undefined
+            let reasoning: string | undefined
+            for (const block of blocks) {
+              if ((block as any).type === 'tool_use') {
+                lastTool = (block as any).name as string
+              }
+              if ((block as any).type === 'thinking' && !(reasoning)) {
+                const raw = (block as any).thinking as string | undefined
+                if (raw) {
+                  // Truncate to keep injected context lean
+                  reasoning = raw.length > 200 ? raw.slice(0, 200) + '…' : raw
+                }
+              }
+            }
+            if (lastTool) {
+              _lastAssistantToolName = lastTool
+              globalTraceStore.write(agentId, {
+                summary: `using tool ${lastTool}`,
+                lastTool,
+                reasoning,
+              })
+            }
+          }
+        }
+
+        // ── Trace sharing: inject peer traces after user (tool result) msgs ──
+        // After a tool result arrives, we know other workers may have progressed.
+        // Append a meta message so this agent sees peer reasoning in context.
+        if (isAsync && message.type === 'user') {
+          yield message
+          const peerText = globalTraceStore.formatPeerTracesForInjection(agentId)
+          if (peerText) {
+            const peerMsg = createUserMessage({
+              content: `[Peer agent traces — for situational awareness only, do not act on unless directly relevant]\n${peerText}`,
+              isMeta: true,
+            })
+            yield peerMsg
+          }
+          continue
+        }
+
         yield message
       }
     }
@@ -814,6 +873,10 @@ export async function* runAgent({
       agentDefinition.callback()
     }
   } finally {
+    // ── Trace sharing: unregister agent from global store ───────────────────
+    if (isAsync) {
+      globalTraceStore.unregister(agentId)
+    }
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
     // Clean up agent's session hooks
