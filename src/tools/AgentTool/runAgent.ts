@@ -749,9 +749,8 @@ export async function* runAgent({
   // Only register when multiple workers might be running (coordinator mode or
   // async execution). This avoids touching the store for simple sync agents.
   const traceLabel = `${agentDefinition.agentType}:${agentId.slice(0, 8)}`
-  if (isAsync) {
-    globalTraceStore.register(agentId, traceLabel)
-  }
+  // Always register for trace sharing (removed isAsync guard for prototype)
+  globalTraceStore.register(agentId, traceLabel)
   // Track the last assistant message content for extracting trace info
   let _lastAssistantToolName: string | undefined
 
@@ -815,7 +814,7 @@ export async function* runAgent({
 
         // ── Trace sharing: write our trace on assistant messages ────────────
         // Extract the last tool name and any thinking content from assistant msgs
-        if (isAsync && message.type === 'assistant') {
+        if (message.type === 'assistant') {
           const assistantMsg = message as AssistantMessage
           const blocks = assistantMsg.message.content
           if (Array.isArray(blocks)) {
@@ -847,7 +846,7 @@ export async function* runAgent({
         // ── Trace sharing: inject peer traces after user (tool result) msgs ──
         // After a tool result arrives, we know other workers may have progressed.
         // Append a meta message so this agent sees peer reasoning in context.
-        if (isAsync && message.type === 'user') {
+        if (message.type === 'user') {
           yield message
           const peerText = globalTraceStore.formatPeerTracesForInjection(agentId)
           if (peerText) {
@@ -874,9 +873,7 @@ export async function* runAgent({
     }
   } finally {
     // ── Trace sharing: unregister agent from global store ───────────────────
-    if (isAsync) {
-      globalTraceStore.unregister(agentId)
-    }
+    globalTraceStore.unregister(agentId)
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
     // Clean up agent's session hooks
