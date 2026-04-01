@@ -8,6 +8,7 @@ import { appendFileSync } from 'node:fs'
 function traceLog(msg: string) {
   try { appendFileSync('/tmp/agent-trace.log', `${new Date().toISOString()} ${msg}\n`) } catch {}
 }
+const TRACE_SHARING_ENABLED = process.env.TRACE_SHARING !== '0'
 import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
@@ -758,8 +759,10 @@ export async function* runAgent({
 
   try {
     // Fix #10: register inside try so unregister in finally always has a matching register
-    traceLog(`[TRACE-DEBUG] runAgent called! agentId=${agentId} label=${traceLabel}`)
-    globalTraceStore.register(agentId, traceLabel)
+    traceLog(`[TRACE-DEBUG] runAgent called! agentId=${agentId} label=${traceLabel} traceSharing=${TRACE_SHARING_ENABLED}`)
+    if (TRACE_SHARING_ENABLED) {
+      globalTraceStore.register(agentId, traceLabel)
+    }
     for await (const message of query({
       messages: initialMessages,
       systemPrompt: agentSystemPrompt,
@@ -874,7 +877,7 @@ export async function* runAgent({
               const summary = parts.join(' | ')
               // Fix #6: wrap trace write in try/catch
               try {
-                globalTraceStore.write(agentId, {
+                TRACE_SHARING_ENABLED && globalTraceStore.write(agentId, {
                   summary,
                   lastTool,
                   reasoning: reasoning || textContent,
@@ -886,7 +889,7 @@ export async function* runAgent({
               // Assistant spoke without using a tool — still worth sharing
               // Fix #6: wrap trace write in try/catch
               try {
-                globalTraceStore.write(agentId, {
+                TRACE_SHARING_ENABLED && globalTraceStore.write(agentId, {
                   summary: `thinking: ${textContent.slice(0, 100)}`,
                   reasoning: textContent,
                 })
@@ -921,7 +924,7 @@ export async function* runAgent({
             if (resultSnippet) {
               // Fix #6: wrap trace write in try/catch
               try {
-                globalTraceStore.write(agentId, {
+                TRACE_SHARING_ENABLED && globalTraceStore.write(agentId, {
                   summary: `${_lastAssistantToolName} result`,
                   lastTool: _lastAssistantToolName,
                   reasoning: resultSnippet,
@@ -939,8 +942,9 @@ export async function* runAgent({
           // Fix #2: use peekFormatPeerTraces so the cursor is only advanced AFTER the
           // yield succeeds — if the yield is abandoned (abort/break) we don't lose the
           // trace entries.
-          const { text: peerText, commit: commitPeerCursor } =
-            globalTraceStore.peekFormatPeerTraces(agentId)
+          const { text: peerText, commit: commitPeerCursor } = TRACE_SHARING_ENABLED
+            ? globalTraceStore.peekFormatPeerTraces(agentId)
+            : { text: '', commit: () => {} }
 
           if (peerText) {
             // Merge the peer-trace annotation into the tool-result message content.
@@ -992,7 +996,7 @@ export async function* runAgent({
     }
   } finally {
     // ── Trace sharing: unregister agent from global store ───────────────────
-    globalTraceStore.unregister(agentId)
+    if (TRACE_SHARING_ENABLED) { globalTraceStore.unregister(agentId) }
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
     // Clean up agent's session hooks
