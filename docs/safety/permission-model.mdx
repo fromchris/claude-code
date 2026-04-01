@@ -1,6 +1,7 @@
 ---
-title: "权限模型"
-description: "三种行为 x 多级来源 = 灵活而严谨的权限体系"
+title: "权限模型 - Allow/Ask/Deny 三级权限体系"
+description: "详解 Claude Code 的三级权限模型：Allow 自动放行、Ask 确认对话框、Deny 直接拒绝。权限规则的层级来源与优先级机制。"
+keywords: ["权限模型", "Allow Ask Deny", "权限控制", "安全权限", "工具权限"]
 ---
 
 {/* 本章目标：详解权限系统的设计 */}
@@ -18,6 +19,10 @@ description: "三种行为 x 多级来源 = 灵活而严谨的权限体系"
 ## 权限规则的层级
 
 规则可以来自多个来源，优先级从高到低：
+
+<Frame caption="权限规则层级（优先级从上到下递减）">
+  <img src="/docs/images/permission-layers.png" alt="权限层级图" />
+</Frame>
 
 <Steps>
   <Step title="用户会话内设置">
