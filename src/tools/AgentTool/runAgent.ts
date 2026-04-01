@@ -824,25 +824,55 @@ export async function* runAgent({
           const blocks = assistantMsg.message.content
           if (Array.isArray(blocks)) {
             let lastTool: string | undefined
+            let toolInput: string | undefined
             let reasoning: string | undefined
+            let textContent: string | undefined
             for (const block of blocks) {
               if ((block as any).type === 'tool_use') {
                 lastTool = (block as any).name as string
+                // Extract key info from tool input
+                const input = (block as any).input
+                if (input) {
+                  if (input.file_path || input.path) {
+                    toolInput = `file: ${input.file_path || input.path}`
+                  } else if (input.command) {
+                    const cmd = String(input.command)
+                    toolInput = `cmd: ${cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd}`
+                  } else if (input.query) {
+                    toolInput = `query: ${input.query}`
+                  } else if (input.url) {
+                    toolInput = `url: ${input.url}`
+                  }
+                }
               }
               if ((block as any).type === 'thinking' && !(reasoning)) {
                 const raw = (block as any).thinking as string | undefined
                 if (raw) {
-                  // Truncate to keep injected context lean
                   reasoning = raw.length > 200 ? raw.slice(0, 200) + '…' : raw
+                }
+              }
+              if ((block as any).type === 'text' && !(textContent)) {
+                const raw = (block as any).text as string | undefined
+                if (raw) {
+                  textContent = raw.length > 150 ? raw.slice(0, 150) + '…' : raw
                 }
               }
             }
             if (lastTool) {
               _lastAssistantToolName = lastTool
+              const parts = [lastTool]
+              if (toolInput) parts.push(toolInput)
+              const summary = parts.join(' | ')
               globalTraceStore.write(agentId, {
-                summary: `using tool ${lastTool}`,
+                summary,
                 lastTool,
-                reasoning,
+                reasoning: reasoning || textContent,
+              })
+            } else if (textContent) {
+              // Assistant spoke without using a tool — still worth sharing
+              globalTraceStore.write(agentId, {
+                summary: `thinking: ${textContent.slice(0, 100)}`,
+                reasoning: textContent,
               })
             }
           }
